@@ -1,0 +1,12 @@
+{
+  "servers": {
+    "Perplexity": {
+      "command": "node",
+      "args": [
+        "C:\\Users\\Vivek Singh\\.perplexity-mcp\\start.mjs"
+      ],
+      "env": {},
+      "type": "stdio"
+    }
+  }
+}

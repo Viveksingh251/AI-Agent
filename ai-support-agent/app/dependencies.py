@@ -1,7 +1,7 @@
 """FastAPI Request Dependencies and Resource Injections."""
 
 from typing import AsyncGenerator
-from fastapi import Depends
+from fastapi import Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings, get_settings
@@ -31,7 +31,16 @@ async def get_database(
     yield session
 
 
-async def get_agent_runner():
-    """Dependency providing the compiled LangGraph customer support agent instance."""
+async def get_agent_runner(request: Request):
+    """Dependency providing the cached compiled LangGraph support agent.
+
+    The graph is compiled once in the app lifespan (``app.state.agent``);
+    falls back to compiling on demand (e.g. tests building routers directly).
+    """
+    cached = getattr(request.app.state, "agent", None)
+    if cached is not None:
+        return cached
+
     from agent.graph import create_support_graph
+
     return create_support_graph()

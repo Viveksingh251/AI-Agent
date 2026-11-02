@@ -38,6 +38,7 @@ def test_settings_sub_components():
         OPENAI_MODEL_NAME="gpt-4o",
         VECTORSTORE_BACKEND="faiss",
         REDIS_ENABLED=True,
+        DATABASE_URL="postgresql+asyncpg://postgres:postgres@localhost:5432/support_agent_db",
     )
     # LLM config
     assert settings.llm.model_name == "gpt-4o"

@@ -5,7 +5,7 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from api.schemas import CustomerCreate, CustomerResponse, TicketResponse
+from api.schemas import CustomerCreate, CustomerResponse, OrderResponse, TicketResponse
 from app.dependencies import (
     AuthenticatedUser,
     get_current_active_user,
@@ -98,3 +98,29 @@ async def list_customer_tickets(
 
     tickets = await crud.list_customer_tickets(db, customer_id=customer_id)
     return [TicketResponse.model_validate(t) for t in tickets]
+
+
+@router.get(
+    "/{customer_id}/orders",
+    response_model=List[OrderResponse],
+    summary="List Customer Orders",
+)
+async def list_customer_orders(
+    customer_id: int,
+    limit: int = Query(10, ge=1, le=50),
+    db: AsyncSession = Depends(get_database),
+    current_user: AuthenticatedUser = Depends(get_current_active_user),
+) -> List[OrderResponse]:
+    """Returns recent orders for the specified customer.
+
+    Customers can only view their own orders; Support staff and Admins can
+    view orders for any customer.
+    """
+    if current_user.role == UserRole.CUSTOMER and current_user.id != customer_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access denied: Cannot view other customers' orders.",
+        )
+
+    orders = await crud.list_customer_orders(db, customer_id=customer_id, limit=limit)
+    return [OrderResponse.model_validate(o) for o in orders]

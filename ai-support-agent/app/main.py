@@ -8,11 +8,12 @@ from typing import Any, Dict
 from fastapi import FastAPI, status
 from fastapi.middleware.cors import CORSMiddleware
 
-from api.routers import auth, chat, customers, rag, tickets
+from api.routers import admin, auth, chat, customers, rag, tickets
 from api.schemas import ComponentHealth, HealthCheckResponse
 from app.config import get_settings
 from app.exceptions import SupportAgentException, support_agent_exception_handler
 from app.logging_config import setup_logging
+from app.middleware import register_middlewares
 
 settings = get_settings()
 logger = logging.getLogger("support_agent.main")
@@ -28,15 +29,33 @@ async def lifespan(app: FastAPI):
         extra={"debug": settings.DEBUG, "port": settings.PORT},
     )
 
-    # 2. Warm up resources (Database, Vector store, Redis checkpointer)
-    # TODO: Initialize database connection pool
-    # TODO: Verify vector store index availability (FAISS / pgvector)
-    # TODO: Verify Redis connectivity if REDIS_ENABLED is True
+    # 2. Initialize the compiled LangGraph agent once (cached singleton)
+    try:
+        from agent.graph import create_support_graph
+
+        app.state.agent = create_support_graph()
+        logger.info("LangGraph support agent compiled and cached.")
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Agent init failed (chat endpoints will 502): %s", exc)
+        app.state.agent = None
+
+    # 3. Ensure DB schema exists in dev/test (Alembic owns it in production)
+    try:
+        from database.session import init_db_models
+
+        await init_db_models()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("DB schema init skipped: %s", exc)
 
     yield
 
     logger.info(f"Shutting down {settings.APP_NAME}...")
-    # TODO: Cleanly close connection pools and background tasks
+    try:
+        from database.session import close_db_connections
+
+        await close_db_connections()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("DB connection disposal skipped: %s", exc)
 
 
 def create_application() -> FastAPI:
@@ -49,6 +68,9 @@ def create_application() -> FastAPI:
         redoc_url="/redoc",
         lifespan=lifespan,
     )
+
+    # Request-ID tracing + global error handling (outermost layers)
+    register_middlewares(app)
 
     # Cross-Origin Resource Sharing (CORS)
     app.add_middleware(
@@ -67,6 +89,7 @@ def create_application() -> FastAPI:
     app.include_router(tickets.router, prefix="/api/v1/tickets", tags=["Tickets"])
     app.include_router(customers.router, prefix="/api/v1/customers", tags=["Customers"])
     app.include_router(auth.router, prefix="/api/v1/auth", tags=["Authentication"])
+    app.include_router(admin.router, prefix="/api/v1/admin", tags=["Admin & Observability"])
     app.include_router(rag.router, prefix="/api/v1/rag", tags=["RAG & Knowledge Base"])
 
     @app.get("/", tags=["General"])

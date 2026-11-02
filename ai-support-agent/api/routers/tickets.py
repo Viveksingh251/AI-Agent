@@ -125,6 +125,12 @@ async def update_ticket(
     response_model=List[TicketResponse],
     summary="List Support Tickets",
 )
+@router.get(
+    "/",
+    response_model=List[TicketResponse],
+    summary="List Support Tickets (trailing slash alias)",
+    include_in_schema=False,
+)
 async def list_tickets(
     status_filter: Optional[str] = Query(None, alias="status"),
     priority_filter: Optional[str] = Query(None, alias="priority"),

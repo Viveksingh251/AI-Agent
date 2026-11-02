@@ -1,104 +1,96 @@
-"""Streamlit Customer Support Frontend Application Entry Point."""
+"""AI Customer Support Portal — Streamlit entry point.
 
-import os
-import uuid
-import httpx
+Run with:
+    streamlit run frontend/app.py
+
+Multi-page navigation lives in frontend/pages/ (Streamlit auto-discovers):
+    1_💬_Chat.py            — customer chat with the LangGraph agent
+    2_🧑‍💻_Agent_Dashboard.py — staff triage / takeover / email approval
+    3_🛡️_Admin.py           — performance summary + agent action logs
+"""
+
+from __future__ import annotations
+
 import streamlit as st
 
-from frontend.components import (
-    render_customer_sidebar,
-    render_escalation_alert,
-    render_header,
-)
+from frontend.api_client import BACKEND_URL
+from frontend.auth import current_auth, do_login, is_logged_in, render_login_form
+from frontend.components import badge, badges, configure_page
 
-BACKEND_API_URL = os.getenv("BACKEND_API_URL", "http://localhost:8000")
+configure_page()
 
 
-def initialize_session_state() -> None:
-    """Initializes persistent chat session state and identifiers."""
-    if "session_id" not in st.session_state:
-        st.session_state["session_id"] = f"session_{uuid.uuid4().hex[:8]}"
+# ---------------------------------------------------------------------------
+# Home page: landing + quick login state
+# ---------------------------------------------------------------------------
 
-    if "messages" not in st.session_state:
-        st.session_state["messages"] = [
-            {
-                "role": "assistant",
-                "content": "Hello! I am your AI Support Assistant. How can I help you today?",
-            }
-        ]
+st.title("🤖 AI Customer Support Portal")
+st.caption("Powered by LangGraph agents, RAG knowledge search, and a FastAPI backend.")
 
-    if "customer_profile" not in st.session_state:
-        st.session_state["customer_profile"] = {
-            "name": "Jane Doe",
-            "customer_id": "CUST-10492",
-            "tier": "Gold Member",
-        }
+# Health dot for the backend
+try:
+    import httpx
 
+    resp = httpx.get(f"{BACKEND_URL}/health", timeout=3.0)
+    ok = resp.status_code == 200
+except Exception:  # noqa: BLE001
+    ok = False
 
-def main():
-    """Main Streamlit execution loop."""
-    render_header()
-    initialize_session_state()
+col_dot, col_txt, _ = st.columns([0.06, 0.5, 0.44])
+with col_dot:
+    st.markdown(
+        f'<span style="display:inline-block;width:12px;height:12px;border-radius:50%;'
+        f'background:{ "#2e7d32" if ok else "#c62828"};"></span>',
+        unsafe_allow_html=True,
+    )
+with col_txt:
+    st.caption(f"Backend: {BACKEND_URL} — {'connected' if ok else 'offline'}")
 
-    # Render customer profile sidebar
-    render_customer_sidebar(st.session_state["customer_profile"])
+st.divider()
 
-    # Render conversation message history
-    for msg in st.session_state["messages"]:
-        with st.chat_message(msg["role"]):
-            st.write(msg["content"])
-            if msg.get("escalated"):
-                render_escalation_alert(
-                    reason=msg.get("escalation_reason", "Complex request requiring supervisor review"),
-                    ticket_id=msg.get("ticket_id"),
-                )
+# ---------------------------------------------------------------------------
+# Navigation cards
+# ---------------------------------------------------------------------------
 
-    # User chat input widget
-    if prompt := st.chat_input("Describe your issue or question..."):
-        # Display user message immediately
-        st.session_state["messages"].append({"role": "user", "content": prompt})
-        with st.chat_message("user"):
-            st.write(prompt)
+c1, c2, c3 = st.columns(3)
 
-        # Call FastAPI backend agent endpoint
-        with st.chat_message("assistant"):
-            message_placeholder = st.empty()
-            with st.spinner("AI Agent is reasoning and searching knowledge base..."):
-                try:
-                    payload = {
-                        "message": prompt,
-                        "session_id": st.session_state["session_id"],
-                        "customer_id": st.session_state["customer_profile"]["customer_id"],
-                    }
+with c1:
+    st.markdown("#### 💬 Customer Chat")
+    st.caption("Chat with the AI agent. It searches the knowledge base, looks up your "
+               "orders, opens tickets, and escalates to humans when needed.")
+    st.page_link("pages/1_💬_Chat.py", label="Open chat →", icon="💬")
 
-                    # TODO: Switch to SSE streaming response when enabled
-                    response = httpx.post(
-                        f"{BACKEND_API_URL}/api/v1/chat",
-                        json=payload,
-                        timeout=30.0,
-                    )
+with c2:
+    st.markdown("#### 🧑‍💻 Agent Dashboard")
+    st.caption("For support staff: triage open tickets, take over escalations, "
+               "review & send drafted follow-up emails.")
+    st.page_link("pages/2_🧑‍💻_Agent_Dashboard.py", label="Open dashboard →", icon="🧑‍💻")
 
-                    if response.status_code == 200:
-                        data = response.json()
-                        reply_text = data.get("response", "No response content received.")
-                        message_placeholder.markdown(reply_text)
+with c3:
+    st.markdown("#### 🛡️ Admin Console")
+    st.caption("Platform observability: agent performance metrics and the full "
+               "action audit trail.")
+    st.page_link("pages/3_🛡️_Admin.py", label="Open console →", icon="🛡️")
 
-                        st.session_state["messages"].append(
-                            {
-                                "role": "assistant",
-                                "content": reply_text,
-                                "escalated": data.get("escalation_required", False),
-                                "ticket_id": data.get("ticket_id"),
-                            }
-                        )
-                    else:
-                        error_msg = f"API Error ({response.status_code}): {response.text}"
-                        message_placeholder.error(error_msg)
+st.divider()
 
-                except Exception as exc:
-                    message_placeholder.error(f"Failed to connect to backend server: {str(exc)}")
+# ---------------------------------------------------------------------------
+# Quick sign-in box (shared across pages via st.session_state)
+# ---------------------------------------------------------------------------
 
+if is_logged_in():
+    auth = current_auth()
+    st.markdown("### 👤 Current session")
+    a1, a2 = st.columns([3, 1])
+    with a1:
+        st.markdown(f"**{auth['me'].get('name', '?')}** — `{auth['me'].get('email', '')}`")
+        st.markdown(badges(auth["me"].get("role")), unsafe_allow_html=True)
+    with a2:
+        from frontend.auth import logout
 
-if __name__ == "__main__":
-    main()
-
+        if st.button("🚪 Log out", use_container_width=True):
+            logout()
+            st.rerun()
+else:
+    st.markdown("### 🔐 Quick sign-in (demo)")
+    render_login_form(compact=True)

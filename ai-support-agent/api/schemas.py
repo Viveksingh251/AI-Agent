@@ -30,6 +30,7 @@ class ChatResponse(BaseModel):
     ticket_id: Optional[str] = Field(default=None, description="Associated ticket ID if generated")
     confidence_score: float = Field(default=1.0, description="Agent confidence score (0.0 to 1.0)")
     turn_count: int = Field(default=1, description="Turn sequence counter")
+    actions: Dict[str, Any] = Field(default_factory=dict, description="Summary of actions taken by the agent (tools used, ticket created, escalation, ...)")
     timestamp: datetime = Field(default_factory=datetime.utcnow, description="UTC response timestamp")
 
 
@@ -236,6 +237,37 @@ class UserProfileResponse(BaseModel):
     user_type: str
     is_active: bool = True
     permissions: List[str] = Field(default_factory=list)
+
+
+# ==============================================================================
+# Admin & Observability Schemas
+# ==============================================================================
+
+class PerformanceSummaryResponse(BaseModel):
+    """Aggregate operational performance metrics for the support platform."""
+
+    window_hours: int = Field(..., description="Lookback window in hours")
+    total_actions: int = Field(default=0, description="Total agent actions logged in window")
+    successful_actions: int = Field(default=0)
+    failed_actions: int = Field(default=0)
+    success_rate: float = Field(default=0.0, description="Success rate 0.0-1.0")
+    actions_by_type: Dict[str, int] = Field(default_factory=dict)
+    escalations: int = Field(default=0, description="Tickets escalated in window")
+    open_tickets: int = Field(default=0)
+    tickets_created: int = Field(default=0)
+
+
+class PerformanceReportResponse(PerformanceSummaryResponse):
+    narrative_report: Optional[str] = Field(default=None, description="LLM-generated qualitative summary")
+
+
+class PaginatedLogsResponse(BaseModel):
+    """Paginated agent action audit-log listing."""
+
+    total: int
+    skip: int
+    limit: int
+    logs: List[AgentActionLogResponse]
 
 
 # ==============================================================================
