@@ -1,16 +1,33 @@
+# ==============================================================================
+# AI Customer Support Agent — development override
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker/docker-compose.dev.yml up
+#
+# Adds: hot-reload source mounts (so edits on the host show inside containers).
+# ==============================================================================
+
 services:
-  backend:
+  api:
     build:
       context: ..
       dockerfile: Dockerfile
     volumes:
       - ../app:/app/app
       - ../agent:/app/agent
-      - ../rag:/app/rag
+      - ../frontend:/app/frontend
       - ../database:/app/database
-      - ../api:/app/api
       - ../tests:/app/tests
     environment:
       - APP_ENV=development
       - DEBUG=true
 
+  frontend:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    volumes:
+      - ../frontend:/app/frontend
+    environment:
+      - APP_ENV=development
+      - DEBUG=true

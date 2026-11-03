@@ -1,0 +1,77 @@
+# ==============================================================================
+# AI Customer Support Agent — production override
+# ------------------------------------------------------------------------------
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+#
+# Differences vs development:
+#   * no --reload, run behind entrypoint with migrations + seed admin
+#   * no host port binding for db/redis (internal only)
+#   * resource limits and prod-tuned restart policy
+# ==============================================================================
+
+services:
+  api:
+    container_name: support-agent-api-prod
+    command: [ "./docker/entrypoint.sh" ]
+    env_file:
+      - .env
+    environment:
+      APP_ENV: production
+      DEBUG: "false"
+      PYTHONUNBUFFERED: "1"
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2g
+        reservations:
+          cpus: "0.5"
+          memory: 512m
+    healthcheck:
+      test: [ "CMD", "curl", "-fsS", "http://localhost:8000/docs" ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+
+  frontend:
+    container_name: support-agent-frontend-prod
+    environment:
+      APP_ENV: production
+      BACKEND_API_URL: http://api:8000
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1g
+
+  db:
+    container_name: support-agent-db-prod
+    ports: [] # no host port exposure in production
+    environment:
+      POSTGRES_USER_FILE: /run/secrets/postgres_user
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    secrets:
+      - postgres_user
+      - postgres_password
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2g
+
+  redis:
+    container_name: support-agent-redis-prod
+    ports: []
+    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 768m
+
+secrets:
+  postgres_user:
+    file: ./secrets/postgres_user.txt
+  postgres_password:
+    file: ./secrets/postgres_password.txt

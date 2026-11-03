@@ -1,93 +1,149 @@
+# ==============================================================================
+# AI Customer Support Agent — full local development stack
+# ------------------------------------------------------------------------------
+#   docker compose up --build          # start everything
+#   docker compose logs -f api         # tail API logs
+#   docker compose down -v             # tear down (with volumes)
+#
+# Services: api (FastAPI), frontend (Streamlit), db (PostgreSQL), redis, qdrant
+# Profile "infra" is off by default — used for pgvector/Qdrant experimentation.
+# ==============================================================================
+
+name: ai-support-agent
+
+x-common-env: &common-env
+  APP_ENV: development
+  PYTHONUNBUFFERED: "1"
+  DATABASE_URL: postgresql+asyncpg://postgres:postgres@db:5432/support_agent
+  REDIS_URL: redis://redis:6379/0
+  VECTORSTORE_TYPE: faiss
+  FAISS_INDEX_DIR: /app/data/faiss_index
+  BACKEND_API_URL: http://api:8000
+
+x-api-build: &api-build
+  build:
+    context: .
+    dockerfile: Dockerfile
+  image: ai-support-agent:latest
+  restart: unless-stopped
+  volumes:
+    - faiss_data:/app/data/faiss_index
+    - ./data/knowledge_base:/app/data/knowledge_base
+    - uploads:/app/data/uploads
+  depends_on:
+    db:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+  networks:
+    - app_net
+
 services:
-  backend:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: support-agent-backend
-    restart: unless-stopped
+  # ----------------------------------------------------------------------------
+  # FastAPI backend
+  # ----------------------------------------------------------------------------
+  api:
+    <<: *api-build
+    container_name: support-agent-api
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
     ports:
       - "8000:8000"
     env_file:
-      - .env
+      - path: .env
+        required: false
     environment:
-      - DATABASE_URL=postgresql+asyncpg://postgres:postgres@postgres:5432/support_agent_db
-      - QDRANT_HOST=qdrant
-      - QDRANT_PORT=6333
-      - REDIS_URL=redis://redis:6379/0
-    depends_on:
-      postgres:
-        condition: service_healthy
-      qdrant:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+      <<: *common-env
+    healthcheck:
+      test: [ "CMD", "curl", "-fsS", "http://localhost:8000/docs" ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
 
+  # ----------------------------------------------------------------------------
+  # Streamlit frontend
+  # ----------------------------------------------------------------------------
   frontend:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    <<: *api-build
     container_name: support-agent-frontend
-    restart: unless-stopped
+    command: streamlit run frontend/app.py --server.port 8501 --server.address 0.0.0.0 --server.headless true
     ports:
       - "8501:8501"
     env_file:
-      - .env
+      - path: .env
+        required: false
     environment:
-      - BACKEND_API_URL=http://backend:8000
+      <<: *common-env
     depends_on:
-      - backend
-    command: ["streamlit", "run", "frontend/app.py", "--server.port=8501", "--server.address=0.0.0.0"]
+      api:
+        condition: service_healthy
 
-  postgres:
-    image: pgvector/pgvector:pg16
-    container_name: support-agent-postgres
+  # ----------------------------------------------------------------------------
+  # PostgreSQL database
+  # ----------------------------------------------------------------------------
+  db:
+    image: postgres:16-alpine
+    container_name: support-agent-db
     restart: unless-stopped
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: support_agent_db
+      POSTGRES_DB: support_agent
     ports:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d support_agent_db"]
+      test: [ "CMD-SHELL", "pg_isready -U postgres -d support_agent" ]
       interval: 10s
       timeout: 5s
       retries: 5
+    networks:
+      - app_net
 
-  qdrant:
-    image: qdrant/qdrant:v1.10.1
-    container_name: support-agent-qdrant
-    restart: unless-stopped
-    ports:
-      - "6333:6333"
-      - "6334:6334"
-    volumes:
-      - qdrant_data:/qdrant/storage
-    healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:6333/healthz || exit 1"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
+  # ----------------------------------------------------------------------------
+  # Redis (cache / rate limiting / celery broker)
+  # ----------------------------------------------------------------------------
   redis:
-    image: redis:7.2-alpine
+    image: redis:7-alpine
     container_name: support-agent-redis
     restart: unless-stopped
+    command: redis-server --appendonly yes
     ports:
       - "6379:6379"
     volumes:
       - redis_data:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: [ "CMD", "redis-cli", "ping" ]
       interval: 10s
       timeout: 5s
       retries: 5
+    networks:
+      - app_net
+
+  # ----------------------------------------------------------------------------
+  # Qdrant vector DB — optional (profile: infra), for pgvector/Qdrant experiments
+  # ----------------------------------------------------------------------------
+  qdrant:
+    image: qdrant/qdrant:v1.12.4
+    container_name: support-agent-qdrant
+    restart: unless-stopped
+    profiles: [ "infra" ]
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    networks:
+      - app_net
+
+networks:
+  app_net:
+    driver: bridge
 
 volumes:
   postgres_data:
-  qdrant_data:
   redis_data:
-
+  qdrant_data:
+  faiss_data:
+  uploads:

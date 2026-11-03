@@ -1,5 +1,23 @@
+# ==============================================================================
+# AI Customer Support Agent — production override
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker/docker-compose.prod.yml up -d
+#
+# Differences vs development:
+#   * runs entrypoint (waits for db, applies Alembic migrations, seeds admin)
+#   * no --reload; multi-worker uvicorn via entrypoint defaults
+#   * secrets injected via files instead of plain env vars
+#   * resource limits applied
+# ==============================================================================
+
 services:
-  backend:
+  api:
+    command: [ "./docker/entrypoint.sh" ]
+    environment:
+      - APP_ENV=production
+      - DEBUG=false
+      - SEED_ADMIN_ON_STARTUP=false
     deploy:
       replicas: 2
       resources:
@@ -9,7 +27,48 @@ services:
         reservations:
           cpus: "0.5"
           memory: 512M
+    healthcheck:
+      test: [ "CMD", "curl", "-fsS", "http://localhost:8000/docs" ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+
+  frontend:
     environment:
       - APP_ENV=production
-      - DEBUG=false
+      - BACKEND_API_URL=http://api:8000
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1024M
 
+  db:
+    environment:
+      POSTGRES_USER_FILE: /run/secrets/postgres_user
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    secrets:
+      - postgres_user
+      - postgres_password
+    ports: [] # not exposed to the host in production
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2048M
+
+  redis:
+    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
+    ports: []
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 768M
+
+secrets:
+  postgres_user:
+    file: ./secrets/postgres_user.txt
+  postgres_password:
+    file: ./secrets/postgres_password.txt

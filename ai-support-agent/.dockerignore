@@ -1,18 +1,73 @@
-__pycache__
-*.pyc
-*.pyo
-*.pyd
-.Python
+# ==============================================================================
+# AI Support Agent — .dockerignore
+# Keeps build context small and prevents secrets/caches from leaking into images
+# ==============================================================================
+
+# --- Version control ---
+.git/
+.gitignore
+.gitattributes
+.github/
+
+# --- Python caches / artifacts ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+
+# --- Virtual environments ---
 .venv/
 venv/
+env/
+ENV/
+
+# --- Secrets & environment ---
 .env
-.git
-.gitignore
-.github/
-.pytest_cache/
-.coverage
-htmlcov/
+.env.*
+!.env.example
+secrets/
+*.pem
+*.key
+*.crt
+id_rsa*
+
+# --- Docker files (avoid recursive copies) ---
+Dockerfile
+docker-compose*.yml
+.dockerignore
+
+# --- Tests & docs ---
 tests/
 docs/
-*.log
+*.md
+!README.md
+LICENSE
+.gitkeep
 
+# --- IDE / OS ---
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# --- Build / runtime junk ---
+*.log
+*.sqlite3
+node_modules/
+
+# --- Data that should be volume-mounted, not baked in ---
+data/faiss_index/
+data/uploads/
+!data/knowledge_base/
