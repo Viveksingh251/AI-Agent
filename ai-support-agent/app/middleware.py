@@ -12,6 +12,8 @@ from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.types import ASGIApp
 
+from app.monitoring import capture_exception, set_log_context
+
 logger = logging.getLogger("support_agent.middleware")
 
 REQUEST_ID_HEADER = "X-Request-ID"
@@ -38,6 +40,7 @@ class RequestIDMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next: RequestResponseEndpoint):
         request_id = request.headers.get(REQUEST_ID_HEADER) or uuid.uuid4().hex[:16]
         request_id_ctx.set(request_id)
+        set_log_context(request_id=request_id)
         request.state.request_id = request_id
 
         t0 = time.monotonic()
@@ -48,6 +51,7 @@ class RequestIDMiddleware(BaseHTTPMiddleware):
                 "UNHANDLED | request_id=%s method=%s path=%s",
                 request_id, request.method, request.url.path,
             )
+            capture_exception()
             response = JSONResponse(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 content={
@@ -86,6 +90,7 @@ class ErrorHandlingMiddleware(BaseHTTPMiddleware):
                 "ERROR HANDLED | request_id=%s path=%s exc=%s",
                 request_id, request.url.path, exc,
             )
+            capture_exception(exc)
             detail = getattr(exc, "message", None) or getattr(exc, "detail", None)
             return JSONResponse(
                 status_code=getattr(exc, "status_code", status.HTTP_500_INTERNAL_SERVER_ERROR)

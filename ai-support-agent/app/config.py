@@ -139,6 +139,7 @@ class Settings(BaseSettings):
     # --------------------------------------------------------------------------
     # Logging Configuration
     # --------------------------------------------------------------------------
+    # (LOG_LEVEL/LOG_JSON_FORMAT consumed by app.logging_config)
     LOG_LEVEL: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = Field(
         default="INFO",
         description="Logging severity threshold",
@@ -195,6 +196,28 @@ class Settings(BaseSettings):
     LANGCHAIN_PROJECT: str = Field(
         default="ai-support-agent",
         description="LangSmith project name",
+    )
+
+    # --------------------------------------------------------------------------
+    # Observability: OpenTelemetry / Sentry
+    # --------------------------------------------------------------------------
+    OTEL_EXPORTER_OTLP_ENDPOINT: Optional[str] = Field(
+        default=None,
+        description="OTLP trace collector endpoint (e.g. http://localhost:4317). Tracing is in-process only when unset.",
+    )
+    SENTRY_DSN: Optional[str] = Field(
+        default=None,
+        description="Sentry DSN for error tracking. Error tracking is disabled when unset.",
+    )
+    SENTRY_TRACES_SAMPLE_RATE: float = Field(
+        default=0.1,
+        ge=0.0,
+        le=1.0,
+        description="Sentry performance tracing sample rate",
+    )
+    SENTRY_RELEASE: Optional[str] = Field(
+        default=None,
+        description="Release identifier reported to Sentry (defaults to ai-support-agent@version).",
     )
 
     # --------------------------------------------------------------------------

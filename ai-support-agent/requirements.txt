@@ -32,6 +32,14 @@ python-dotenv>=1.0.1,<2.0.0
 # Frontend & UI
 streamlit>=1.36.0,<2.0.0
 
+# Observability: metrics, tracing, error tracking
+prometheus-client>=0.20.0,<1.0.0
+opentelemetry-api>=1.25.0,<2.0.0
+opentelemetry-sdk>=1.25.0,<2.0.0
+opentelemetry-instrumentation-fastapi>=0.45b0,<1.0.0
+opentelemetry-exporter-otlp>=1.25.0,<2.0.0
+sentry-sdk>=2.0.0,<3.0.0
+
 # Testing & Quality Assurance
 pytest>=8.2.2,<9.0.0
 pytest-asyncio>=0.23.8,<1.0.0

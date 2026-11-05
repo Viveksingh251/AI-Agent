@@ -1,7 +1,7 @@
 """LangGraph StateGraph Workflow Composition and Checkpoint Management."""
 
 import logging
-from typing import Any, Literal, Optional
+from typing import Any, Dict, Literal, Optional
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 
@@ -15,8 +15,33 @@ from agent.nodes import (
 from agent.state import SupportAgentState
 from agent.tools.registry import get_all_tools, register_all
 from agent.tools.registry import execute_tools as execute_tools_node
+from app.monitoring import set_log_context, trace_agent_node
 
 logger = logging.getLogger("support_agent.graph")
+
+
+def _instrument(node_name: str, fn):
+    """Wrap a LangGraph node function with observability.
+
+    Adds per-node OpenTelemetry spans + Prometheus duration metrics, and
+    propagates session/user/ticket context into the structured log context
+    so every log line inside the node carries request metadata.
+    """
+    if not callable(fn):
+        return fn
+
+    async def instrumented(state: SupportAgentState) -> Dict[str, Any]:
+        session_id = state.get("session_id")
+        set_log_context(
+            session_id=str(session_id) if session_id else None,
+            user_id=str(state.get("customer_id")) if state.get("customer_id") else None,
+            ticket_id=str(state.get("current_ticket_id")) if state.get("current_ticket_id") else None,
+        )
+        async with trace_agent_node(node_name, session_id=str(session_id) if session_id else None):
+            return await fn(state)
+
+    instrumented.__name__ = getattr(fn, "__name__", node_name)
+    return instrumented
 
 
 def route_after_triage(
@@ -71,13 +96,13 @@ def create_support_graph(checkpointer: Optional[Any] = None):
     """
     workflow = StateGraph(SupportAgentState)
 
-    # Register workflow nodes
-    workflow.add_node("triage", intent_classifier)
-    workflow.add_node("retrieve_context", retrieve_knowledge)
-    workflow.add_node("execute_tools", execute_tools_node)
-    workflow.add_node("generate_response", generate_response)
-    workflow.add_node("escalate_to_human", escalate_to_human)
-    workflow.add_node("audit", audit_and_log)
+    # Register workflow nodes (wrapped with tracing + metrics instrumentation)
+    workflow.add_node("triage", _instrument("triage", intent_classifier))
+    workflow.add_node("retrieve_context", _instrument("retrieve_context", retrieve_knowledge))
+    workflow.add_node("execute_tools", _instrument("execute_tools", execute_tools_node))
+    workflow.add_node("generate_response", _instrument("generate_response", generate_response))
+    workflow.add_node("escalate_to_human", _instrument("escalate_to_human", escalate_to_human))
+    workflow.add_node("audit", _instrument("audit", audit_and_log))
 
     # Establish workflow transitions
     workflow.add_edge(START, "triage")

@@ -16,6 +16,7 @@ from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.tools import BaseTool
 
 from agent.state import SupportAgentState
+from app.monitoring import trace_tool_call, record_tool_usage, add_span_event
 
 logger = logging.getLogger("support_agent.tools.registry")
 
@@ -116,14 +117,17 @@ async def execute_tools(state: SupportAgentState) -> Dict[str, Any]:
 
         args.update(_system_injected_args(state, name))
         logger.info("execute_tools: running %s args=%s", name, args)
-        try:
-            result = await tool_obj.ainvoke(args)
-            if isinstance(result, BaseTool):
-                result = {"success": False, "error": "tool returned itself"}
-            payload = result if isinstance(result, dict) else {"success": True, "data": result}
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("Tool %s raised", name)
-            payload = {"success": False, "error": f"Tool '{name}' failed unexpectedly."}
+        async with trace_tool_call(name, session_id=str(state.get("session_id")) if state.get("session_id") else None):
+            try:
+                result = await tool_obj.ainvoke(args)
+                if isinstance(result, BaseTool):
+                    result = {"success": False, "error": "tool returned itself"}
+                payload = result if isinstance(result, dict) else {"success": True, "data": result}
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("Tool %s raised", name)
+                payload = {"success": False, "error": f"Tool '{name}' failed unexpectedly."}
+        record_tool_usage(name, success=bool(payload.get("success", False)))
+        add_span_event("tool.completed", {"success": bool(payload.get("success", False))})
 
         tools_used.append(name)
         # Surface key results into state for downstream nodes.

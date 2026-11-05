@@ -14,6 +14,7 @@ from app.config import get_settings
 from app.exceptions import SupportAgentException, support_agent_exception_handler
 from app.logging_config import setup_logging
 from app.middleware import register_middlewares
+from app.monitoring import init_monitoring, render_metrics
 
 settings = get_settings()
 logger = logging.getLogger("support_agent.main")
@@ -22,8 +23,10 @@ logger = logging.getLogger("support_agent.main")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan manager for initialization and graceful teardown."""
-    # 1. Initialize structured logging system
+    # 1. Initialize the full observability stack (JSON logging + context,
+    #    OpenTelemetry tracing, Prometheus registry, LangSmith, Sentry)
     setup_logging(settings)
+    init_monitoring(settings, app)
     logger.info(
         f"Starting {settings.APP_NAME} in '{settings.APP_ENV.value if hasattr(settings.APP_ENV, 'value') else settings.APP_ENV}' environment",
         extra={"debug": settings.DEBUG, "port": settings.PORT},
@@ -83,6 +86,23 @@ def create_application() -> FastAPI:
 
     # Register Domain Exception Handlers
     app.add_exception_handler(SupportAgentException, support_agent_exception_handler)
+
+    # Prometheus metrics exposition endpoint (scraped by Prometheus/Prometheus Agent)
+    from fastapi import Response
+
+    @app.get(
+        "/metrics",
+        summary="Prometheus Metrics",
+        tags=["Observability"],
+        include_in_schema=True,
+    )
+    async def prometheus_metrics() -> Response:
+        """Expose application metrics in Prometheus exposition format.
+
+        Metrics: conversation count, tool usage, escalation rate, response
+        time histogram, ticket creation rate, HTTP request counters.
+        """
+        return Response(content=render_metrics(), media_type="text/plain; version=0.0.4; charset=utf-8")
 
     # Mount API Sub-Routers
     app.include_router(chat.router, prefix="/api/v1/chat", tags=["Chat & Agent"])

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 import uuid
 from datetime import datetime, timezone
 from typing import Any, AsyncGenerator, Dict, List, Optional
@@ -24,6 +25,8 @@ from fastapi.responses import StreamingResponse
 from langchain_core.messages import AIMessage, HumanMessage
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.middleware import get_request_id
+
 from agent.state import initial_state
 from api.schemas import ChatRequest, ChatResponse
 from app.dependencies import (
@@ -32,6 +35,11 @@ from app.dependencies import (
     get_current_active_user,
     get_database,
     UserRole,
+)
+from app.monitoring import (
+    observe_conversation_outcome,
+    record_conversation,
+    set_log_context,
 )
 from langgraph.checkpoint.memory import MemorySaver
 
@@ -164,12 +172,20 @@ async def process_chat_message(
     """
     session_id = payload.session_id or f"sess_{uuid.uuid4().hex[:12]}"
     customer_id = _resolve_customer_id(payload, current_user)
+    set_log_context(
+        session_id=session_id,
+        user_id=str(current_user.id),
+        request_id=get_request_id(),
+    )
+    record_conversation(new_session=not bool(payload.session_id))
     logger.info(
         "Chat turn | session=%s customer=%s user=%s",
         session_id, customer_id, current_user.email,
     )
 
+    t0 = time.perf_counter()
     final_state = await _run_agent(agent_runner, payload, customer_id, session_id)
+    observe_conversation_outcome(final_state, time.perf_counter() - t0, endpoint="chat")
     return _build_chat_response(payload, current_user, session_id, final_state)
 
 
@@ -200,6 +216,12 @@ async def stream_chat_message(
     """
     session_id = payload.session_id or f"sess_{uuid.uuid4().hex[:12]}"
     customer_id = _resolve_customer_id(payload, current_user)
+    set_log_context(
+        session_id=session_id,
+        user_id=str(current_user.id),
+        request_id=get_request_id(),
+    )
+    record_conversation(new_session=not bool(payload.session_id))
     logger.info("Chat stream | session=%s customer=%s", session_id, customer_id)
 
     async def event_stream() -> AsyncGenerator[str, None]:
@@ -207,6 +229,7 @@ async def stream_chat_message(
             return f"event: {event}\ndata: {json.dumps(data, default=str)}\n\n"
 
         try:
+            t0 = time.perf_counter()
             state = initial_state(session_id=session_id, customer_id=customer_id)
             state["messages"] = [HumanMessage(content=payload.message)]
             config = {"configurable": {"thread_id": session_id}}
@@ -229,6 +252,7 @@ async def stream_chat_message(
                         })
 
             response = _build_chat_response(payload, current_user, session_id, final_state)
+            observe_conversation_outcome(final_state, time.perf_counter() - t0, endpoint="chat_stream")
 
             # Stream the final answer in word chunks for a live-typing feel.
             for word in response.response.split(" "):
