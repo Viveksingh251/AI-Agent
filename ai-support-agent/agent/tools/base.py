@@ -11,6 +11,9 @@ invocations share one consistent pattern:
 3. **Structured results** — every tool returns a dict with at least
    ``success: bool``; errors carry ``success=False`` plus a human-readable
    ``error`` message (never raw exceptions leaked to the LLM).
+4. **Injection-proof roles** — ``normalize_role`` whitelists the role
+   string *before* any authorization decision, so a hostile or corrupted
+   value can never be interpreted as a staff role.
 """
 
 from __future__ import annotations
@@ -21,8 +24,28 @@ from typing import Any, AsyncIterator, Dict, Optional
 
 logger = logging.getLogger("support_agent.tools")
 
+from app.input_sanitizer import redact_mapping  # noqa: E402
+
 # Roles that may access any customer's data.
 STAFF_ROLES = {"support_agent", "admin", "staff"}
+
+# The ONLY roles any caller may claim. Anything else (including values
+# arriving from an LLM, a tampered payload, or a bug) is coerced to the
+# least-privileged default.
+VALID_ROLES = {"customer", "support_agent", "admin", "staff"}
+DEFAULT_ROLE = "customer"
+
+
+def normalize_role(role: Any) -> str:
+    """Whitelist-normalise a role string.
+
+    Deny-by-default: unknown / missing / hostile values become 'customer'
+    so an invalid role can never grant staff clearance.
+    """
+    if not isinstance(role, str):
+        return DEFAULT_ROLE
+    value = role.strip().lower()
+    return value if value in VALID_ROLES else DEFAULT_ROLE
 
 
 # ---------------------------------------------------------------------------
@@ -66,7 +89,11 @@ def is_authorized(
     - staff roles (support_agent / admin) → always authorized
     - customers → only when the resource belongs to them
     - anonymous (no id) → never authorized for customer-scoped resources
+
+    The role is normalised through :func:`normalize_role` first — an
+    unrecognised role value is treated as 'customer', never as staff.
     """
+    role = normalize_role(role)
     if role in STAFF_ROLES:
         return True
     if not requesting_customer_id:
@@ -105,7 +132,7 @@ async def audit_log(
         action,
         customer_id,
         success,
-        details,
+        redact_mapping(details),
     )
     try:
         from database.crud import log_agent_action  # noqa: PLC0415

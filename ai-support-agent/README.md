@@ -18,6 +18,7 @@ A modular, production-grade AI Customer Support Agent platform built with **Lang
 | [docs/API.md](docs/API.md) | OpenAPI-style reference of every endpoint |
 | [docs/ADDING_TOOLS.md](docs/ADDING_TOOLS.md) | Step-by-step guide to adding a new agent tool |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | How to contribute code |
+| [docs/SECURITY.md](docs/SECURITY.md) | Security review: implemented hardening + recommendations |
 | [docs/deployment.md](docs/deployment.md) | Docker/Kubernetes deployment guide |
 
 ---
@@ -123,7 +124,7 @@ ai-support-agent/
 ├── frontend/                   # Streamlit UI (chat, agent dashboard, admin)
 ├── tests/                      # pytest suite (181 tests)
 ├── scripts/                    # seed_admin.py, seed_db.py, run_ingest.py, evaluate_agent.py
-├── docs/                       # architecture.md, API.md, ADDING_TOOLS.md, deployment.md
+├── docs/                       # ARCHITECTURE.md, API.md, ADDING_TOOLS.md, deployment.md
 ├── docker-compose.yml          # Full local stack (api, frontend, db, redis, qdrant)
 ├── Dockerfile
 ├── Makefile                    # install / run / test / ingest / migrate / docker-up

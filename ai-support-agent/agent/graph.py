@@ -59,7 +59,16 @@ def route_after_triage(
         return "retrieve_context"
 
     # 3. Actionable operations route to tool execution
-    if intent in ["order_status", "billing", "account_update", "ticket_lookup"]:
+    # (kept in sync with TOOL_INTENTS in agent/state.py)
+    if intent in [
+        "order_status",
+        "billing",
+        "account_update",
+        "ticket_lookup",
+        "ticket_create",
+        "ticket_update",
+        "email_draft",
+    ]:
         return "execute_tools"
 
     # Default fallback

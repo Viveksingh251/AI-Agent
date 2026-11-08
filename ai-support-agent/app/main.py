@@ -15,6 +15,7 @@ from app.exceptions import SupportAgentException, support_agent_exception_handle
 from app.logging_config import setup_logging
 from app.middleware import register_middlewares
 from app.monitoring import init_monitoring, render_metrics
+from app.rate_limit import add_rate_limiting
 
 settings = get_settings()
 logger = logging.getLogger("support_agent.main")
@@ -74,6 +75,17 @@ def create_application() -> FastAPI:
 
     # Request-ID tracing + global error handling (outermost layers)
     register_middlewares(app)
+
+    # Per-identity rate limiting (runs after request-id middleware is set up,
+    # so 429 envelopes still carry an X-Request-ID). The chat router sets
+    # request.state.authenticated_user, making limits apply per user, not per IP.
+    add_rate_limiting(
+        app,
+        enabled=settings.RATE_LIMIT_ENABLED,
+        default_spec=settings.RATE_LIMIT_DEFAULT,
+        login_spec=settings.RATE_LIMIT_LOGIN,
+        chat_spec=settings.RATE_LIMIT_CHAT,
+    )
 
     # Cross-Origin Resource Sharing (CORS)
     app.add_middleware(

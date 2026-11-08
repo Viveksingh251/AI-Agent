@@ -290,6 +290,59 @@ class Settings(BaseSettings):
     )
 
     # --------------------------------------------------------------------------
+    # Rate Limiting (in-memory; swap backend for multi-worker deployments)
+    # --------------------------------------------------------------------------
+    RATE_LIMIT_ENABLED: bool = Field(
+        default=True,
+        description="Enable per-identity rate limiting middleware",
+    )
+    RATE_LIMIT_DEFAULT: str = Field(
+        default="120/minute",
+        description="Default rate limit spec ('N/second|minute|hour') for unscoped endpoints",
+    )
+    RATE_LIMIT_LOGIN: str = Field(
+        default="10/minute",
+        description="Rate limit for /auth/login, /auth/token and /auth/register (brute-force protection)",
+    )
+    RATE_LIMIT_CHAT: str = Field(
+        default="30/minute",
+        description="Rate limit for chat endpoints (LLM cost protection)",
+    )
+
+    # --------------------------------------------------------------------------
+    # Resilience: Timeouts & Circuit Breakers
+    # --------------------------------------------------------------------------
+    TOOL_TIMEOUT_SECONDS: float = Field(
+        default=20.0,
+        gt=0,
+        description="Hard deadline per agent tool invocation (seconds)",
+    )
+    CIRCUIT_BREAKER_ENABLED: bool = Field(
+        default=True,
+        description="Enable circuit breakers around external dependencies",
+    )
+    CIRCUIT_BREAKER_FAILURE_THRESHOLD: int = Field(
+        default=5,
+        ge=1,
+        description="Consecutive failures before a circuit opens",
+    )
+    CIRCUIT_BREAKER_RESET_SECONDS: float = Field(
+        default=30.0,
+        gt=0,
+        description="Cooldown before a half-open circuit probes again (seconds)",
+    )
+
+    # --------------------------------------------------------------------------
+    # Input Safety
+    # --------------------------------------------------------------------------
+    MAX_MESSAGE_LENGTH: int = Field(
+        default=4000,
+        ge=1,
+        le=100_000,
+        description="Maximum accepted chat message length (characters)",
+    )
+
+    # --------------------------------------------------------------------------
     # Redis Cache & Memory (Optional)
     # --------------------------------------------------------------------------
     REDIS_ENABLED: bool = Field(
@@ -403,13 +456,20 @@ class Settings(BaseSettings):
 
         # Enforce secure configuration in production
         if self.APP_ENV == AppEnvironment.PRODUCTION:
-            if "temporary_dev_secret_key" in self.SECRET_KEY:
+            if "temporary_dev_secret_key" in self.SECRET_KEY or len(self.SECRET_KEY) < 32:
                 raise ValueError(
-                    "Production configuration error: SECRET_KEY must be changed from default value."
+                    "Production configuration error: SECRET_KEY must be changed from default value "
+                    "and be at least 32 characters. Generate one with: openssl rand -hex 32",
                 )
             if self.DEBUG:
                 # Force debug off in production
                 object.__setattr__(self, "DEBUG", False)
+            if self.LLM_PROVIDER != "mock" and not self.OPENAI_API_KEY:
+                raise ValueError(
+                    "Production configuration error: OPENAI_API_KEY is required when LLM_PROVIDER != 'mock'."
+                )
+            if self.ALGORITHM not in ("HS256", "HS384", "HS512"):
+                raise ValueError(f"Unsupported JWT algorithm: {self.ALGORITHM}")
 
         return self
 

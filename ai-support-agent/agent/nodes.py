@@ -77,9 +77,49 @@ except ImportError:
 
 
 def _get_llm(model: str = "gpt-4o-mini", temperature: float = 0.2) -> Any:
-    """Return a ChatOpenAI instance, or a stub callable if unavailable."""
+    """Return an LLM client with a hard per-call timeout, or a stub callable
+    if langchain_openai is unavailable.
+
+    The timeout wrapper prevents a hung provider connection from blocking a
+    worker indefinitely; on timeout the caller's existing try/except falls
+    back to safe defaults (triage defaults, template emails, etc.).
+    """
+    from app.config import get_settings
+
+    timeout_seconds = get_settings().OPENAI_TIMEOUT_SECONDS
+
     if _OPENAI_AVAILABLE:
-        return ChatOpenAI(model=model, temperature=temperature)  # type: ignore[call-arg]
+        base_llm = ChatOpenAI(model=model, temperature=temperature, timeout=timeout_seconds)  # type: ignore[call-arg]
+
+        class _TimeoutLLM:
+            """Thin proxy adding an asyncio deadline around every ainvoke."""
+
+            def __getattr__(self, item: str) -> Any:
+                return getattr(base_llm, item)
+
+            async def ainvoke(self, messages: Any, **kwargs: Any) -> Any:
+                from app.resilience import with_timeout, get_breaker
+
+                breaker = get_breaker(
+                    "llm",
+                    failure_threshold=get_settings().CIRCUIT_BREAKER_FAILURE_THRESHOLD,
+                    reset_timeout=get_settings().CIRCUIT_BREAKER_RESET_SECONDS,
+                    enabled=get_settings().CIRCUIT_BREAKER_ENABLED,
+                )
+                breaker.check()
+                try:
+                    result = await with_timeout(
+                        base_llm.ainvoke(messages, **kwargs),
+                        timeout_seconds,
+                        what=f"LLM call ({model})",
+                    )
+                except Exception:
+                    breaker.record_failure()
+                    raise
+                breaker.record_success()
+                return result
+
+        return _TimeoutLLM()
 
     # Stub: returns a fixed AIMessage so the graph still runs in tests.
     class _StubLLM:
@@ -186,16 +226,18 @@ async def intent_classifier(state: SupportAgentState) -> Dict[str, Any]:
         logger.error("intent_classifier LLM call failed: %s", exc)
         parsed = None
 
-    # Defaults on parse failure
+    # Defaults on parse failure — SAFE DEFAULTS: fail toward human review.
+    # An unparseable/failed triage must never silently continue as a confident
+    # low-risk classification.
     if not parsed:
         parsed = {
             "intent": "general_inquiry",
             "sub_intent": None,
             "sentiment": "neutral",
-            "urgency": "medium",
-            "escalation_required": False,
-            "escalation_reason": None,
-            "confidence": 0.5,
+            "urgency": "high",
+            "escalation_required": True,
+            "escalation_reason": "Triage classification unavailable — routing to human review (safe default).",
+            "confidence": 0.0,
         }
 
     # Check hard-coded escalation triggers
@@ -205,6 +247,16 @@ async def intent_classifier(state: SupportAgentState) -> Dict[str, Any]:
         parsed.setdefault("escalation_reason", f"Customer sentiment: {parsed['sentiment']}")
     if parsed.get("intent") in ESCALATION_INTENTS:
         escalation_needed = True
+
+    # Prompt-injection flag from the API layer routes to human review too —
+    # an attempted manipulation is a security event, not a support question.
+    injection_categories = (state.get("metadata") or {}).get("injection_categories") or []
+    if injection_categories:
+        escalation_needed = True
+        parsed.setdefault(
+            "escalation_reason",
+            f"Potential prompt injection detected ({', '.join(injection_categories)}) — human review required.",
+        )
 
     tools_used = list(state.get("tools_used", [])) + ["intent_classifier"]
 

@@ -13,8 +13,18 @@ from pydantic import BaseModel, EmailStr, Field
 class ChatRequest(BaseModel):
     """Payload sent by client to interact with the customer support agent."""
 
-    message: str = Field(..., min_length=1, description="Customer text prompt or query")
-    session_id: Optional[str] = Field(default=None, description="Conversation session ID for thread continuity")
+    message: str = Field(
+        ...,
+        min_length=1,
+        max_length=4000,
+        description="Customer text prompt or query (hard-capped; further validated by app.input_sanitizer)",
+    )
+    session_id: Optional[str] = Field(
+        default=None,
+        max_length=64,
+        pattern=r"^[A-Za-z0-9._-]*$",
+        description="Conversation session ID for thread continuity",
+    )
     customer_id: Optional[str] = Field(default=None, description="Customer external identifier")
     stream: bool = Field(default=False, description="Whether to stream response tokens")
 

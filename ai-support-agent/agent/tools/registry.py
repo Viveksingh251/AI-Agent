@@ -16,7 +16,10 @@ from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.tools import BaseTool
 
 from agent.state import SupportAgentState
+from app.input_sanitizer import redact_mapping
 from app.monitoring import trace_tool_call, record_tool_usage, add_span_event
+from app.resilience import get_breaker, run_tool_with_resilience
+from app.config import get_settings
 
 logger = logging.getLogger("support_agent.tools.registry")
 
@@ -62,17 +65,31 @@ def register_all() -> Dict[str, BaseTool]:
 get_all_tools = register_all
 
 
+def _dependency_for_tool(tool_name: str) -> str:
+    """Map a tool to the external dependency its failure is attributed to
+    (drives which circuit breaker opens)."""
+    if tool_name == "search_knowledge_base":
+        return "vector_store"
+    if tool_name == "draft_followup_email":
+        return "llm"
+    return "database"
+
+
 def _system_injected_args(state: SupportAgentState, tool_name: str) -> Dict[str, Any]:
-    """Authorization context injected server-side — the LLM can never set it."""
+    """Authorization context injected server-side — the LLM can never set it.
+
+    The role is taken ONLY from ``state['metadata']['role']`` (set by the
+    authenticated API user) and normalised through the whitelist in
+    ``agent.tools.base.normalize_role``: any unexpected value collapses to
+    'customer', so a tampered or LLM-supplied role can never grant staff
+    clearance.
+    """
+    from agent.tools.base import normalize_role  # noqa: PLC0415
+
     injected: Dict[str, Any] = {
         "requesting_customer_id": state.get("customer_id"),
     }
-    role = (state.get("metadata") or {}).get("role", "customer")
-    injected["role"] = role
-    # Escalation drafted by the AI assistant on the customer's behalf runs
-    # with staff clearance only when the session itself is staffed.
-    if tool_name == "escalate_ticket" and role not in ("support_agent", "admin"):
-        injected["role"] = role  # keep customer clearance; deny() will fire
+    injected["role"] = normalize_role((state.get("metadata") or {}).get("role"))
     return injected
 
 
@@ -94,6 +111,7 @@ async def execute_tools(state: SupportAgentState) -> Dict[str, Any]:
     tools = register_all()
     messages = list(state.get("messages", []))
     calls: List[Dict[str, Any]] = []
+    merged: Dict[str, Any] = {}
 
     last_ai = next((m for m in reversed(messages) if isinstance(m, AIMessage)), None)
     if last_ai is not None and getattr(last_ai, "tool_calls", None):
@@ -116,45 +134,70 @@ async def execute_tools(state: SupportAgentState) -> Dict[str, Any]:
             continue
 
         args.update(_system_injected_args(state, name))
-        logger.info("execute_tools: running %s args=%s", name, args)
+        logger.info("execute_tools: running %s args=%s", name, redact_mapping(args))
+        settings = get_settings()
+        breaker = get_breaker(
+            _dependency_for_tool(name),
+            failure_threshold=settings.CIRCUIT_BREAKER_FAILURE_THRESHOLD,
+            reset_timeout=settings.CIRCUIT_BREAKER_RESET_SECONDS,
+            enabled=settings.CIRCUIT_BREAKER_ENABLED,
+        )
         async with trace_tool_call(name, session_id=str(state.get("session_id")) if state.get("session_id") else None):
             try:
-                result = await tool_obj.ainvoke(args)
+                result = await run_tool_with_resilience(
+                    lambda: tool_obj.ainvoke(args),  # noqa: B023 — bound per iteration
+                    tool_name=name,
+                    timeout_seconds=settings.TOOL_TIMEOUT_SECONDS,
+                    breaker=breaker,
+                )
                 if isinstance(result, BaseTool):
                     result = {"success": False, "error": "tool returned itself"}
                 payload = result if isinstance(result, dict) else {"success": True, "data": result}
-            except Exception as exc:  # noqa: BLE001
-                logger.exception("Tool %s raised", name)
-                payload = {"success": False, "error": f"Tool '{name}' failed unexpectedly."}
+            except Exception as exc:  # noqa: BLE001 — timeouts, open circuits, tool errors
+                logger.warning("Tool %s failed: %s: %s", name, type(exc).__name__, exc)
+                payload = {
+                    "success": False,
+                    "error": f"Tool '{name}' is temporarily unavailable. Please try again shortly.",
+                }
         record_tool_usage(name, success=bool(payload.get("success", False)))
         add_span_event("tool.completed", {"success": bool(payload.get("success", False))})
 
         tools_used.append(name)
-        # Surface key results into state for downstream nodes.
-        state_update: Dict[str, Any] = {"tools_used": tools_used, "messages": new_messages}
+
+        # Surface key results into state for downstream nodes. Updates are
+        # accumulated into ``merged`` and returned once after the loop so
+        # every tool's promotion (ticket ref, order data, …) survives.
         if name == "get_customer_info" and payload.get("success"):
-            state_update["customer_data"] = payload.get("customer")
+            merged["customer_data"] = payload.get("customer")
         if name == "get_order_status" and payload.get("success"):
-            state_update["order_data"] = payload.get("order")
+            merged["order_data"] = payload.get("order")
         if name in ("create_support_ticket", "update_ticket_status", "escalate_ticket") and payload.get("success"):
-            state_update["ticket_data"] = payload.get("ticket")
-            state_update["current_ticket_id"] = (payload.get("ticket") or {}).get("id")
+            merged["ticket_data"] = payload.get("ticket")
+            ticket_ref = (payload.get("ticket") or {}).get("id")
+            if ticket_ref:
+                merged["current_ticket_id"] = str(ticket_ref)
         if name == "escalate_ticket" and payload.get("success"):
-            state_update["escalation_needed"] = True
+            merged["escalation_needed"] = True
         if name == "search_knowledge_base" and payload.get("success"):
-            state_update["retrieved_docs"] = payload.get("results", [])
+            merged["retrieved_docs"] = payload.get("results", [])
+        if name == "draft_followup_email" and payload.get("success"):
+            merged["draft_email"] = payload.get("email")
 
         new_messages.append(
             ToolMessage(content=json.dumps(payload, default=str), tool_call_id=call["id"])
         )
-        # keep the reference for the final partial return
-        state_update["messages"] = new_messages
 
-    return {"messages": new_messages, "tools_used": tools_used, **_derived_state(state, calls, tools)}
+    return {
+        "messages": new_messages,
+        "tools_used": tools_used,
+        **merged,
+        **_derived_state(state, calls, tools),
+    }
 
 
 def _derived_state(state: SupportAgentState, calls: List[Dict[str, Any]], tools: Dict[str, BaseTool]) -> Dict[str, Any]:
     """Nothing extra for now — placeholder keeps the merge surface explicit."""
+    del state, calls, tools  # unused; placeholder extension point
     return {}
 
 
@@ -172,6 +215,7 @@ _FALLBACK_MAP: Dict[str, List[str]] = {
     "ticket_update": ["update_ticket_status"],
     "ticket_lookup": ["get_ticket_history"],
     "email_draft": ["draft_followup_email"],
+    "general_inquiry": ["search_knowledge_base"],
     "escalation_request": ["escalate_ticket"],
 }
 
@@ -207,7 +251,17 @@ def _intent_fallback_calls(state: SupportAgentState) -> List[Dict[str, Any]]:
                 continue
             args = {"subject": text.strip()[:100], "description": text.strip(), "priority": "medium"}
         elif name in ("update_ticket_status", "escalate_ticket", "draft_followup_email"):
-            continue  # need an explicit ticket id; skip rather than guess
+            # These tools need an explicit ticket id. Use the ticket created
+            # or looked up earlier in this session when available; otherwise
+            # skip rather than guess an identifier.
+            ticket_ref = state.get("current_ticket_id") or (state.get("ticket_data") or {}).get("ticket_number") or (state.get("ticket_data") or {}).get("id")
+            if not ticket_ref:
+                continue
+            args = {"ticket_id": str(ticket_ref)}
+            if name == "escalate_ticket":
+                args["reason"] = text[:200] or "Escalated during live conversation"
+            if name == "draft_followup_email":
+                args["tone"] = "apologetic"
         if args or name == "search_knowledge_base":
             calls.append({"id": f"fallback_{name}_{len(calls)}", "name": name, "args": args})
     return calls

@@ -25,6 +25,13 @@ from fastapi.responses import StreamingResponse
 from langchain_core.messages import AIMessage, HumanMessage
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.input_sanitizer import (
+    InputValidationError,
+    detect_prompt_injection,
+    escape_for_prompt,
+    sanitize_message,
+    sanitize_session_id,
+)
 from app.middleware import get_request_id
 
 from agent.state import initial_state
@@ -96,15 +103,50 @@ def _extract_actions(final_state: Dict[str, Any]) -> Dict[str, Any]:
     return {k: v for k, v in actions.items() if v not in (None, False, [], "")}
 
 
+def _validate_chat_payload(payload: ChatRequest) -> str:
+    """Validate + sanitise the chat payload at the API boundary.
+
+    Returns the sanitised message. Raises HTTPException(400) on invalid
+    input and HTTP 200-with-flag (never an error) on detected injection —
+    injection is logged and neutralised downstream, not blindly rejected,
+    to avoid a trivially exploitable oracle.
+    """
+    try:
+        message = sanitize_message(payload.message)
+        payload.session_id = sanitize_session_id(payload.session_id)
+    except InputValidationError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    return message
+
+
 async def _run_agent(
     agent_runner: Any,
     payload: ChatRequest,
     customer_id: str,
     session_id: str,
+    current_user: Optional[AuthenticatedUser] = None,
 ) -> Dict[str, Any]:
     """Invoke the LangGraph workflow and return its final state."""
+    from agent.state import initial_state
+
+    message = _validate_chat_payload(payload)
+
+    # Prompt-injection screening: log + tag high-risk input, never execute
+    # raw. The untrusted text is also escaped before it reaches any prompt.
+    high_risk, categories = detect_prompt_injection(message)
+    if high_risk:
+        logger.warning(
+            "PROMPT INJECTION SUSPECTED | session=%s user=%s categories=%s",
+            session_id, current_user.id if current_user else "?", categories,
+        )
+        message = escape_for_prompt(message)
+
     state = initial_state(session_id=session_id, customer_id=customer_id)
-    state["messages"] = [HumanMessage(content=payload.message)]
+    state["messages"] = [HumanMessage(content=message)]
+    state["metadata"] = {
+        "role": current_user.role.value if current_user else "customer",
+        "injection_categories": categories,
+    }
 
     config = {"configurable": {"thread_id": session_id}}
     try:
@@ -184,7 +226,7 @@ async def process_chat_message(
     )
 
     t0 = time.perf_counter()
-    final_state = await _run_agent(agent_runner, payload, customer_id, session_id)
+    final_state = await _run_agent(agent_runner, payload, customer_id, session_id, current_user)
     observe_conversation_outcome(final_state, time.perf_counter() - t0, endpoint="chat")
     return _build_chat_response(payload, current_user, session_id, final_state)
 
@@ -231,7 +273,15 @@ async def stream_chat_message(
         try:
             t0 = time.perf_counter()
             state = initial_state(session_id=session_id, customer_id=customer_id)
-            state["messages"] = [HumanMessage(content=payload.message)]
+            try:
+                message = _validate_chat_payload(payload)
+            except HTTPException:
+                raise
+            state["messages"] = [HumanMessage(content=message)]
+            state["metadata"] = {
+                "role": current_user.role.value if current_user else "customer",
+                "injection_categories": detect_prompt_injection(message)[1],
+            }
             config = {"configurable": {"thread_id": session_id}}
 
             final_state: Dict[str, Any] = dict(state)

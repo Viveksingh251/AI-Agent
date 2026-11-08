@@ -27,6 +27,7 @@ def test_environment_normalization():
         APP_ENV="prod",
         SECRET_KEY="a-very-secure-random-production-secret-key-32chars",
         DEBUG=False,
+        OPENAI_API_KEY="sk-test-production-key",  # required in production when LLM_PROVIDER != 'mock'
     )
     assert prod_settings.APP_ENV == AppEnvironment.PRODUCTION
     assert prod_settings.is_production is True

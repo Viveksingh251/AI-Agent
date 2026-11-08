@@ -13,6 +13,10 @@ from typing import Any, Dict, Optional
 
 from app.config import Settings, get_settings
 
+# PII redaction is applied centrally at the formatter so EVERY log line —
+# including third-party loggers — is scrubbed before it leaves the process.
+from app.input_sanitizer import redact_pii  # noqa: E402
+
 
 class JSONLogFormatter(logging.Formatter):
     """Formats log records into standard JSON objects for automated ingestion."""
@@ -21,12 +25,20 @@ class JSONLogFormatter(logging.Formatter):
         self,
         environment: str = "development",
         service_name: str = "ai-support-agent",
+        redact_pii_enabled: bool = True,
         *args: Any,
         **kwargs: Any,
     ):
         super().__init__(*args, **kwargs)
         self.environment = environment
         self.service_name = service_name
+        self.redact_pii_enabled = redact_pii_enabled
+
+    def _scrub(self, text: Any) -> Any:
+        """Redact PII from any string value destined for the log payload."""
+        if not self.redact_pii_enabled or not isinstance(text, str):
+            return text
+        return redact_pii(text)
 
     def format(self, record: logging.LogRecord) -> str:
         """Transforms a standard LogRecord into a JSON string."""
@@ -35,7 +47,7 @@ class JSONLogFormatter(logging.Formatter):
             "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
             "level": record.levelname,
             "logger": record.name,
-            "message": record.getMessage(),
+            "message": self._scrub(record.getMessage()),
             "service": self.service_name,
             "environment": self.environment,
             "location": {
@@ -71,9 +83,19 @@ class JSONLogFormatter(logging.Formatter):
             if key not in standard_attrs and not key.startswith("_")
         }
         if extra_data:
-            log_payload["extra"] = extra_data
+            log_payload["extra"] = self._scrub_extra(extra_data)
 
         return json.dumps(log_payload, default=str)
+
+    def _scrub_extra(self, data: Any, depth: int = 0) -> Any:
+        """Recursively redact PII inside structured 'extra' fields (bounded)."""
+        if depth > 4:
+            return str(data)[:500]
+        if isinstance(data, dict):
+            return {k: self._scrub_extra(v, depth + 1) for k, v in data.items()}
+        if isinstance(data, (list, tuple)):
+            return [self._scrub_extra(v, depth + 1) for v in data]
+        return self._scrub(data)
 
 
 class StandardConsoleFormatter(logging.Formatter):
@@ -86,6 +108,10 @@ class StandardConsoleFormatter(logging.Formatter):
             *args,
             **kwargs,
         )
+
+    def format(self, record: logging.LogRecord) -> str:
+        record.msg = redact_pii(str(record.msg))
+        return super().format(record)
 
 
 def setup_logging(settings: Optional[Settings] = None) -> None:
@@ -102,6 +128,7 @@ def setup_logging(settings: Optional[Settings] = None) -> None:
         formatter = JSONLogFormatter(
             environment=str(_settings.APP_ENV.value if hasattr(_settings.APP_ENV, "value") else _settings.APP_ENV),
             service_name=_settings.APP_NAME,
+            redact_pii_enabled=True,
         )
     else:
         formatter = StandardConsoleFormatter()
